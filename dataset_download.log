@@ -1,0 +1,5 @@
+2025-05-11 03:11:37,875 - dataset_downloader - INFO - Using synthetic data for training
+2025-05-11 03:11:38,832 - dataset_downloader - INFO - Creating 20 synthetic training images
+2025-05-11 03:11:39,486 - dataset_downloader - INFO - Creating 5 synthetic validation images
+2025-05-11 03:11:39,575 - dataset_downloader - INFO - Created 20 training samples and 5 validation samples
+2025-05-11 03:11:39,575 - dataset_downloader - INFO - Dataset preparation complete. Data saved to dataset

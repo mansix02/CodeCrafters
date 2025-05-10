@@ -1,6 +1,9 @@
 import { useState, useRef, useEffect } from 'react'
 import './App.css'
 
+// Base URL for the Python camera server
+const API_BASE_URL = 'http://localhost:5000';
+
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false)
   const [username, setUsername] = useState('')
@@ -9,21 +12,24 @@ function App() {
   const [activeTab, setActiveTab] = useState('dashboard')
   const [isCameraOpen, setIsCameraOpen] = useState(false)
   const [cameraError, setCameraError] = useState('')
+  const [currentPage, setCurrentPage] = useState('login') // login, dashboard, camera
   const [detections, setDetections] = useState([])
+  const [cameraStatus, setCameraStatus] = useState('idle') // idle, loading, ready, error
+  const [modelStatus, setModelStatus] = useState({ initialized: false, loading: false })
   const [detectionData, setDetectionData] = useState([
-    { id: 1, location: 'Camera 1', timestamp: '2023-09-01 09:30:45', status: 'Detected' },
-    { id: 2, location: 'Camera 2', timestamp: '2023-09-01 10:15:22', status: 'Detected' },
-    { id: 3, location: 'Camera 3', timestamp: '2023-09-01 11:05:17', status: 'Clean' },
+    { id: 1, location: 'Camera 1', timestamp: '2023-09-01 09:30:45', status: 'Spitting Detected', severity: 'high' },
+    { id: 2, location: 'Camera 2', timestamp: '2023-09-01 10:15:22', status: 'Spitting Detected', severity: 'medium' },
+    { id: 3, location: 'Camera 3', timestamp: '2023-09-01 11:05:17', status: 'Clean', severity: 'none' },
   ])
   
-  const videoRef = useRef(null)
-  const streamRef = useRef(null)
+  const imgRef = useRef(null)
   
   const handleLogin = (e) => {
     e.preventDefault()
     // Simple mock authentication - in a real app, this would validate against an API
     if (username === 'admin' && password === 'admin123') {
       setIsLoggedIn(true)
+      setCurrentPage('dashboard')
       setError('')
     } else {
       setError('Invalid username or password')
@@ -34,124 +40,287 @@ function App() {
     setIsLoggedIn(false)
     setUsername('')
     setPassword('')
+    setCurrentPage('login')
     closeCamera()
   }
-  
-  const openCamera = async () => {
-    setCameraError('')
-    
+
+  // Check model status
+  const checkModelStatus = async () => {
     try {
-      console.log("Attempting to access camera...")
-      
-      // First check if getUserMedia is supported
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error("Camera API is not supported in your browser")
-      }
-      
-      // Request camera access with very basic constraints first
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: true,
-        audio: false
-      })
-      
-      console.log("Camera access granted")
-      
-      if (videoRef.current) {
-        console.log("Setting video source")
-        videoRef.current.srcObject = stream
-        
-        // Make sure video is set to play when ready
-        videoRef.current.onloadedmetadata = () => {
-          console.log("Video metadata loaded")
-          videoRef.current.play()
-            .then(() => console.log("Video playing"))
-            .catch(e => console.error("Error playing video:", e))
-        }
-        
-        streamRef.current = stream
-        setIsCameraOpen(true)
-      } else {
-        console.error("Video ref is null")
-        throw new Error("Video element not available")
-      }
-    } catch (err) {
-      console.error("Error opening camera:", err)
-      setCameraError(`Unable to access camera: ${err.message}. Please check permissions.`)
+      setModelStatus(prev => ({ ...prev, loading: true }));
+      const response = await fetch(`${API_BASE_URL}/model_status`);
+      const data = await response.json();
+      setModelStatus({
+        initialized: data.initialized,
+        loading: false,
+        path: data.model_path
+      });
+    } catch (error) {
+      console.error("Error checking model status:", error);
+      setModelStatus({
+        initialized: false,
+        loading: false,
+        error: error.message
+      });
     }
-  }
-  
-  const closeCamera = () => {
-    if (streamRef.current) {
-      const tracks = streamRef.current.getTracks()
-      tracks.forEach(track => track.stop())
-      streamRef.current = null
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null
-    }
-    setIsCameraOpen(false)
-  }
-  
-  const captureDetection = () => {
-    // In a real implementation, this would use ML/AI to detect spitting
-    // For demo purposes, we'll simulate a detection
-    const canvas = document.createElement('canvas')
-    const video = videoRef.current
-    
-    if (video) {
-      canvas.width = video.videoWidth
-      canvas.height = video.videoHeight
-      const ctx = canvas.getContext('2d')
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-      
-      // Convert to base64 for storage/display
-      const imageData = canvas.toDataURL('image/jpeg')
-      
-      const newDetection = {
-        id: detections.length + 4, // +4 because we have 3 mock entries
-        location: 'Live Camera',
-        timestamp: new Date().toLocaleString(),
-        status: 'Detected',
-        image: imageData
-      }
-      
-      setDetections(prevDetections => [newDetection, ...prevDetections])
-      
-      // Update the detection data shown in dashboard
-      setDetectionData(prevData => [newDetection, ...prevData.slice(0, 9)])
-      
-      alert("Spit detected and recorded!")
-    }
-  }
-  
-  // Simulate random detections (for demo purposes)
-  const simulateRandomDetection = () => {
-    // 25% chance to detect spitting
-    if (Math.random() < 0.25 && isCameraOpen) {
-      captureDetection()
-    }
-  }
-  
+  };
+
+  // This useEffect initializes the camera when we navigate to the camera page
   useEffect(() => {
-    let interval
+    // Check model status when app loads
+    checkModelStatus();
+    
+    // Only try to initialize camera if we're on the camera page
+    if (currentPage === 'camera') {
+      initCamera()
+    }
+    
+    // Clean up when leaving the camera page
+    return () => {
+      if (currentPage !== 'camera' && isCameraOpen) {
+        closeCamera()
+      }
+    }
+  }, [currentPage])
+  
+  // Start a periodic check for new detections
+  useEffect(() => {
+    let checkInterval;
+    
     if (isCameraOpen) {
-      // Check every 5 seconds
-      interval = setInterval(simulateRandomDetection, 5000)
+      // Check for new detections every 3 seconds
+      checkInterval = setInterval(() => {
+        checkForDetections()
+      }, 3000)
     }
     
     return () => {
-      if (interval) clearInterval(interval)
+      if (checkInterval) {
+        clearInterval(checkInterval)
+      }
     }
   }, [isCameraOpen])
+  
+  const checkForDetections = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/get_last_detection`)
+      const data = await response.json()
+      
+      if (data.success && data.detection) {
+        // Add this detection to our list
+        const newDetection = {
+          id: detections.length + 4,
+          location: 'Live Camera',
+          timestamp: data.detection.timestamp,
+          status: 'Spitting Detected',
+          severity: 'high',
+          image: data.detection.image
+        }
+        
+        setDetections(prevDetections => {
+          // Check if we already have this detection (based on timestamp)
+          const exists = prevDetections.some(d => d.timestamp === data.detection.timestamp);
+          if (exists) return prevDetections;
+          return [newDetection, ...prevDetections];
+        });
+        
+        setDetectionData(prevData => {
+          // Check if we already have this detection
+          const exists = prevData.some(d => d.timestamp === data.detection.timestamp);
+          if (exists) return prevData;
+          return [newDetection, ...prevData.slice(0, 9)];
+        });
+        
+        // Play alert sound and show alert
+        const audio = new Audio('/alert.mp3');
+        audio.play().catch(e => console.log("Audio play error (may be expected):", e));
+        
+        alert("⚠️ ALERT: Spitting detected and recorded! Authorities have been notified.");
+      }
+    } catch (error) {
+      console.error("Error checking for detections:", error)
+    }
+  }
+  
+  const initCamera = async () => {
+    setCameraStatus('loading')
+    setCameraError('')
+    
+    try {
+      console.log("Starting camera on Python server...")
+      
+      // Tell the Python server to start the camera
+      const response = await fetch(`${API_BASE_URL}/start_camera`, {
+        method: 'POST'
+      })
+      
+      if (!response.ok) {
+        throw new Error("Failed to start camera on server")
+      }
+      
+      // Set a timeout to give the camera time to initialize
+      setTimeout(() => {
+        setCameraStatus('ready')
+        setIsCameraOpen(true)
+        
+        // Also check model status
+        checkModelStatus();
+      }, 1000)
+      
+    } catch (err) {
+      console.error("Camera initialization error:", err)
+      setCameraError(`Camera error: ${err.message}. Make sure the Python server is running.`)
+      setCameraStatus('error')
+    }
+  }
+  
+  const openCamera = () => {
+    console.log("Opening camera page...")
+    setCurrentPage('camera')
+  }
+  
+  const closeCamera = async () => {
+    console.log("Closing camera...")
+    
+    try {
+      // Tell the Python server to stop the camera
+      await fetch(`${API_BASE_URL}/stop_camera`, {
+        method: 'POST'
+      })
+    } catch (err) {
+      console.error("Error stopping camera:", err)
+    }
+    
+    setIsCameraOpen(false)
+    setCameraStatus('idle')
+    setCurrentPage(isLoggedIn ? 'dashboard' : 'login')
+  }
+  
+  const captureDetection = async () => {
+    if (!isCameraOpen) {
+      console.error("Camera not open")
+      return
+    }
+    
+    try {
+      const response = await fetch(`${API_BASE_URL}/capture_detection`)
+      const data = await response.json()
+      
+      if (data.success && data.detection) {
+        // Add this detection to our list
+        const newDetection = {
+          id: detections.length + 4,
+          location: 'Live Camera',
+          timestamp: data.detection.timestamp,
+          status: 'Spitting Detected',
+          severity: 'medium',
+          image: data.detection.image
+        }
+        
+        setDetections(prevDetections => [newDetection, ...prevDetections])
+        setDetectionData(prevData => [newDetection, ...prevData.slice(0, 9)])
+        
+        alert("Manual detection recorded!")
+      } else {
+        alert("Failed to capture detection")
+      }
+    } catch (err) {
+      console.error("Error capturing detection:", err)
+      alert("Error capturing detection: " + err.message)
+    }
+  }
 
-  // Login Page Component
+  // Camera Page Component
+  const CameraPage = () => (
+    <div className="camera-page">
+      <div className="camera-header">
+        <button onClick={closeCamera} className="camera-back-button">
+          <span>←</span> Back
+        </button>
+        <h2>AI Spitting Detection System</h2>
+      </div>
+      
+      <div className="camera-view-container">
+        {cameraStatus === 'error' ? (
+          <div className="camera-error-full">
+            <h3>Camera Error</h3>
+            <p>{cameraError}</p>
+            <button onClick={initCamera}>Retry Camera</button>
+          </div>
+        ) : cameraStatus === 'loading' ? (
+          <div className="camera-loading-full">
+            <div className="loader"></div>
+            <p>Initializing camera...</p>
+          </div>
+        ) : (
+          <div className="camera-live-container">
+            <div className="camera-live-feed">
+              <img 
+                src={`${API_BASE_URL}/video_feed?${new Date().getTime()}`} 
+                alt="Live Camera Feed" 
+                ref={imgRef}
+              />
+              <div className="camera-controls">
+                <div className="camera-status">
+                  <span 
+                    className={`status-indicator ${
+                      modelStatus.initialized ? 'status-green' : 'status-red'
+                    }`}
+                  ></span>
+                  <span className="status-text">
+                    AI Model: {modelStatus.initialized ? 'Active' : 'Not Ready'}
+                  </span>
+                </div>
+                
+                <div className="camera-status">
+                  <span className="status-indicator status-green"></span>
+                  <span className="status-text">Camera Active</span>
+                </div>
+                
+                <button onClick={captureDetection} className="capture-button">
+                  Manual Capture
+                </button>
+              </div>
+            </div>
+            
+            <div className="detection-info">
+              <h3>Detection Information</h3>
+              {detections.length > 0 ? (
+                <div className="detection-card">
+                  <h4>Latest Detection</h4>
+                  <p>Time: {detections[0].timestamp}</p>
+                  <p>Status: {detections[0].status}</p>
+                  <p>Severity: {detections[0].severity}</p>
+                  {detections[0].image && (
+                    <img 
+                      src={detections[0].image} 
+                      alt="Detection" 
+                      className="detection-image"
+                    />
+                  )}
+                </div>
+              ) : (
+                <p>No detections recorded yet. System monitoring in progress.</p>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+
+  // Login Page Component  
   const LoginPage = () => (
     <div className="login-container">
-      <div className="login-form">
-        <h1>Spit Detection System</h1>
-        <h2>Admin Login</h2>
+      <div className="login-form-container">
+        <div className="login-header">
+          <h1>Spitting Detection System</h1>
+          <p>AI-powered public hygiene monitoring</p>
+        </div>
+        
         {error && <div className="error-message">{error}</div>}
-        <form onSubmit={handleLogin}>
+        
+        <form onSubmit={handleLogin} className="login-form">
           <div className="form-group">
             <label htmlFor="username">Username</label>
             <input
@@ -162,6 +331,7 @@ function App() {
               required
             />
           </div>
+          
           <div className="form-group">
             <label htmlFor="password">Password</label>
             <input
@@ -172,53 +342,42 @@ function App() {
               required
             />
           </div>
+          
           <button type="submit" className="login-button">Login</button>
         </form>
         
-        <div className="camera-section">
-          <h3>Quick Spit Detection</h3>
-          <p>Open camera to monitor and detect in real-time</p>
-          
-          <div className="camera-container">
-            {isCameraOpen ? (
-              <>
-                <video 
-                  ref={videoRef} 
-                  autoPlay 
-                  playsInline
-                  muted
-                  className="camera-preview"
-                />
-                <div className="camera-controls">
-                  <button onClick={closeCamera} className="camera-button close">
-                    Close Camera
-                  </button>
-                  <button onClick={captureDetection} className="camera-button capture">
-                    Simulate Detection
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <button onClick={openCamera} className="camera-button open">
-                  Open Camera
-                </button>
-                {cameraError && <div className="camera-error">{cameraError}</div>}
-              </>
-            )}
-          </div>
+        <div className="login-help">
+          <p>Demo credentials: admin / admin123</p>
         </div>
+      </div>
+      
+      <div className="login-info">
+        <h2>AI-Powered Spitting Detection</h2>
+        <p>
+          Our system uses advanced YOLOv8 computer vision technology to detect spitting behavior 
+          in public spaces, promoting hygiene and supporting civic enforcement efforts.
+        </p>
+        <ul>
+          <li>Real-time AI detection</li>
+          <li>Automatic alerts</li>
+          <li>Evidence capture</li>
+          <li>Dashboard reporting</li>
+        </ul>
       </div>
     </div>
   )
 
   // Dashboard Component
   const Dashboard = () => (
-    <div className="dashboard-container">
+    <div className="dashboard">
       <div className="dashboard-header">
-        <h1>Spit Detection System - Admin Dashboard</h1>
-        <button onClick={handleLogout} className="logout-button">Logout</button>
+        <h1>Spitting Detection Dashboard</h1>
+        <div className="user-controls">
+          <span>Welcome, {username || 'Admin'}</span>
+          <button onClick={handleLogout} className="logout-button">Logout</button>
+        </div>
       </div>
+      
       <div className="dashboard-tabs">
         <button 
           className={activeTab === 'dashboard' ? 'active' : ''} 
@@ -227,109 +386,87 @@ function App() {
           Dashboard
         </button>
         <button 
-          className={activeTab === 'detections' ? 'active' : ''} 
+          className={activeTab === 'detections' ? 'active' : ''}
           onClick={() => setActiveTab('detections')}
         >
           Detections
         </button>
         <button 
-          className={activeTab === 'cameras' ? 'active' : ''} 
-          onClick={() => setActiveTab('cameras')}
-        >
-          Cameras
-        </button>
-        <button 
-          className={activeTab === 'settings' ? 'active' : ''} 
+          className={activeTab === 'settings' ? 'active' : ''}
           onClick={() => setActiveTab('settings')}
         >
           Settings
         </button>
       </div>
+      
       <div className="dashboard-content">
         {activeTab === 'dashboard' && (
-          <div className="dashboard-overview">
-            <h2>System Overview</h2>
+          <div className="dashboard-main">
             <div className="stats-cards">
               <div className="stat-card">
-                <h3>Total Detections</h3>
-                <p className="stat-value">{detectionData.length}</p>
-              </div>
-              <div className="stat-card">
                 <h3>Active Cameras</h3>
-                <p className="stat-value">{isCameraOpen ? 1 : 0}</p>
+                <div className="stat-value">4</div>
+                <div className="stat-trend positive">All Online</div>
               </div>
+              
               <div className="stat-card">
-                <h3>Today's Alerts</h3>
-                <p className="stat-value">{detections.length}</p>
+                <h3>Detections Today</h3>
+                <div className="stat-value">{detectionData.length}</div>
+                <div className="stat-trend negative">+3 from yesterday</div>
               </div>
+              
               <div className="stat-card">
-                <h3>System Status</h3>
-                <p className="stat-value status-active">Active</p>
+                <h3>Response Rate</h3>
+                <div className="stat-value">92%</div>
+                <div className="stat-trend positive">+5% from last week</div>
+              </div>
+              
+              <div className="stat-card">
+                <h3>AI Model Status</h3>
+                <div className="stat-value">
+                  {modelStatus.initialized ? 'Active' : 'Loading...'}
+                </div>
+                <div className={`stat-trend ${modelStatus.initialized ? 'positive' : 'negative'}`}>
+                  {modelStatus.initialized ? 'YOLOv8 Running' : 'Initializing'}
+                </div>
               </div>
             </div>
             
-            <div className="camera-dashboard">
-              <h3>Live Camera Feed</h3>
-              <div className="camera-container dashboard-camera">
-                {isCameraOpen ? (
-                  <>
-                    <video 
-                      ref={videoRef} 
-                      autoPlay 
-                      playsInline
-                      muted
-                      className="camera-preview"
-                    />
-                    <div className="camera-controls">
-                      <button onClick={closeCamera} className="camera-button close">
-                        Close Camera
-                      </button>
-                      <button onClick={captureDetection} className="camera-button capture">
-                        Capture Detection
-                      </button>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <button onClick={openCamera} className="camera-button open">
-                      Open Camera
-                    </button>
-                    {cameraError && <div className="camera-error">{cameraError}</div>}
-                  </>
-                )}
-              </div>
+            <div className="dashboard-buttons">
+              <button onClick={openCamera} className="action-button camera-button">
+                <span className="icon">📷</span>
+                Open Live Camera
+              </button>
+              
+              <button className="action-button reports-button">
+                <span className="icon">📊</span>
+                Download Reports
+              </button>
             </div>
             
-            <div className="recent-detections">
+            <div className="recent-activity">
               <h3>Recent Detections</h3>
-              <table>
+              <table className="detections-table">
                 <thead>
                   <tr>
                     <th>ID</th>
                     <th>Location</th>
-                    <th>Timestamp</th>
+                    <th>Time</th>
                     <th>Status</th>
-                    <th>Evidence</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
                   {detectionData.map(detection => (
-                    <tr key={detection.id}>
+                    <tr key={detection.id} className={detection.status === 'Spitting Detected' ? 'detection-row-alert' : ''}>
                       <td>{detection.id}</td>
                       <td>{detection.location}</td>
                       <td>{detection.timestamp}</td>
-                      <td className={detection.status === 'Detected' ? 'status-alert' : 'status-clean'}>
+                      <td className={`status-cell ${detection.status === 'Spitting Detected' ? 'status-alert' : 'status-ok'}`}>
                         {detection.status}
                       </td>
                       <td>
-                        {detection.image && (
-                          <img 
-                            src={detection.image} 
-                            alt="Detection evidence" 
-                            className="evidence-thumbnail"
-                            onClick={() => window.open(detection.image, '_blank')}
-                          />
-                        )}
+                        <button className="view-button">View</button>
                       </td>
                     </tr>
                   ))}
@@ -338,48 +475,138 @@ function App() {
             </div>
           </div>
         )}
+        
         {activeTab === 'detections' && (
-          <div className="detections-panel">
-            <h2>Detection History</h2>
-            <div className="detections-gallery">
-              {detectionData.filter(d => d.status === 'Detected').map(detection => (
-                <div key={detection.id} className="detection-card">
-                  <div className="detection-info">
-                    <p><strong>ID:</strong> {detection.id}</p>
-                    <p><strong>Location:</strong> {detection.location}</p>
-                    <p><strong>Time:</strong> {detection.timestamp}</p>
+          <div className="detections-tab">
+            <h2>Recorded Detections</h2>
+            <div className="detections-filters">
+              <select defaultValue="all">
+                <option value="all">All Locations</option>
+                <option value="camera1">Camera 1</option>
+                <option value="camera2">Camera 2</option>
+                <option value="live">Live Camera</option>
+              </select>
+              
+              <select defaultValue="all">
+                <option value="all">All Statuses</option>
+                <option value="detected">Spitting Detected</option>
+                <option value="clean">Clean</option>
+              </select>
+              
+              <button className="filter-button">Filter</button>
+            </div>
+            
+            <div className="detections-list">
+              {detections.length > 0 ? (
+                detections.map(detection => (
+                  <div className="detection-item" key={detection.id}>
+                    <div className="detection-info">
+                      <h4>Detection #{detection.id}</h4>
+                      <p>Location: {detection.location}</p>
+                      <p>Time: {detection.timestamp}</p>
+                      <p className={`detection-status ${detection.status === 'Spitting Detected' ? 'status-alert' : 'status-ok'}`}>
+                        Status: {detection.status}
+                      </p>
+                      <p>Severity: {detection.severity}</p>
+                      <div className="detection-actions">
+                        <button>View Details</button>
+                        <button>Download</button>
+                      </div>
+                    </div>
+                    
+                    {detection.image && (
+                      <div className="detection-image-container">
+                        <img src={detection.image} alt={`Detection ${detection.id}`} />
+                      </div>
+                    )}
                   </div>
-                  {detection.image && (
-                    <img 
-                      src={detection.image} 
-                      alt="Detection evidence" 
-                      className="detection-image"
-                    />
-                  )}
+                ))
+              ) : (
+                <div className="no-detections">
+                  <p>No detections recorded yet. Start the camera to begin monitoring.</p>
+                  <button onClick={openCamera} className="open-camera-button">
+                    Start Camera
+                  </button>
                 </div>
-              ))}
+              )}
             </div>
           </div>
         )}
-        {activeTab === 'cameras' && (
-          <div className="cameras-panel">
-            <h2>Camera Management</h2>
-            <p>Configure and monitor connected cameras here.</p>
-          </div>
-        )}
+        
         {activeTab === 'settings' && (
-          <div className="settings-panel">
+          <div className="settings-tab">
             <h2>System Settings</h2>
-            <p>Configure system parameters and notification settings.</p>
+            
+            <div className="settings-group">
+              <h3>Camera Settings</h3>
+              <div className="setting-item">
+                <label>Detection Sensitivity</label>
+                <select defaultValue="medium">
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
+              </div>
+              
+              <div className="setting-item">
+                <label>Notification Sound</label>
+                <select defaultValue="on">
+                  <option value="on">On</option>
+                  <option value="off">Off</option>
+                </select>
+              </div>
+            </div>
+            
+            <div className="settings-group">
+              <h3>AI Model Settings</h3>
+              <div className="setting-item">
+                <label>Model Status</label>
+                <div className={`model-status ${modelStatus.initialized ? 'model-active' : 'model-inactive'}`}>
+                  {modelStatus.initialized ? 'Active' : 'Inactive'}
+                </div>
+              </div>
+              
+              <div className="setting-item">
+                <label>Model Path</label>
+                <input type="text" readOnly value={modelStatus.path || 'Not loaded'} />
+              </div>
+              
+              <div className="setting-item">
+                <button 
+                  onClick={checkModelStatus} 
+                  disabled={modelStatus.loading}
+                  className="refresh-button"
+                >
+                  {modelStatus.loading ? 'Loading...' : 'Refresh Model Status'}
+                </button>
+              </div>
+            </div>
+            
+            <div className="settings-actions">
+              <button className="save-settings">Save Settings</button>
+            </div>
           </div>
         )}
       </div>
     </div>
   )
 
+  const renderPage = () => {
+    switch (currentPage) {
+      case 'login':
+        return <LoginPage />
+      case 'dashboard':
+        return <Dashboard />
+      case 'camera':
+        return <CameraPage />
+      default:
+        return <LoginPage />
+    }
+  }
+
   return (
-    <div className="app">
-      {isLoggedIn ? <Dashboard /> : <LoginPage />}
+    <div className="app-container">
+      {renderPage()}
     </div>
   )
 }
